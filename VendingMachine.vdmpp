@@ -1,0 +1,146 @@
+class VendingMachine
+/*
+  Contains the core model of the vending machine.
+  Defines the state variables and operations available to the users.
+  Among other features, illustrates the usage of 'atomic'.
+  JPF, FEUP, MFES, 2014/15.
+*/
+
+types
+	public BagOfCoins = MoneyUtils`BagOfCoins;
+	public ProductName = Product`ProductName;
+	public ProductPrice = Product`ProductPrice;
+	public Status=<OnFactory> | <OnMaintenance> | <Idle> | <EnteringCoins> | <Delivering>;
+	public Password = seq of char;
+	
+instance variables
+	/* Tip: variables declared public to facilitate queries */
+
+	-- Items observable by buyer (in display, selection buttons, and pickup slots):
+	public products: map ProductName to Product := { |-> };
+	public status : Status := <OnFactory>; 
+	public amountInserted: nat := 0;
+	public changeToPickup : BagOfCoins := {|->}; 
+	public productToPickup : [Product] := nil;
+
+	-- Items observable by maintenance operator:
+	public stockOfCoins: BagOfCoins := {|->};
+
+  -- Items observable by factory operator:
+  public maintenanceCode : Password := []; 
+
+	inv amountInserted <> 0 <=> status = <EnteringCoins>;
+	inv changeToPickup <> {|->} or productToPickup <> nil <=> status = <Delivering>;
+	inv productToPickup <> nil => productToPickup in set rng products;
+	 
+operations
+	/** FACTORY OPERATIONS **/	
+	public VendingMachine: () ==> VendingMachine
+		VendingMachine() == 
+			return self;
+	
+	public setMaintenanceCode: Password ==> ()
+	setMaintenanceCode(code) ==
+		maintenanceCode := code
+	pre status = <OnFactory>;
+		
+	public setProductsAtSale: map ProductName to ProductPrice ==> ()
+	setProductsAtSale(prods) ==
+		products := {name |-> new Product(name, prods(name)) | name in set dom prods}
+	pre status = <OnFactory>;
+	
+	public setReady: () ==> ()
+	setReady() ==
+		status := <Idle>
+	pre status = <OnFactory>;
+			
+	/** MAINTENANCE OPERATIONS **/
+	public openDoor: Password ==> ()
+	openDoor(code) ==
+		if code = maintenanceCode then 
+			status := <OnMaintenance>
+	pre status = <Idle>;
+	
+	public loadCoins: BagOfCoins ==> () 
+	loadCoins(coins) ==
+		stockOfCoins := coins
+	pre status = <OnMaintenance>; 
+
+  -- 'prods' is a mapping from product name to number of items
+	public loadProducts: map ProductName to nat1  ==> () 
+	loadProducts(prods) ==
+		for all nm in set dom prods do
+			products(nm).addToStock(prods(nm))
+	pre status = <OnMaintenance>
+	 		and dom prods subset dom products; 
+	
+	public closeDoor: () ==> ()
+	closeDoor() ==
+		status := <Idle>
+	pre status = <OnMaintenance>;
+
+	/** BUYER OPERATIONS **/
+	public insertCoin: MoneyUtils`Coin ==> () 
+	insertCoin(coin) == 
+		atomic (
+			stockOfCoins := MoneyUtils`add(coin, stockOfCoins);
+			amountInserted :=  amountInserted + coin;
+			status := <EnteringCoins>
+		)
+	pre status in set {<Idle>, <EnteringCoins>}; 
+
+	public selectProduct: ProductName ==> ()
+	selectProduct(prodName) == 
+		let p = products(prodName),
+			 chg = MoneyUtils`extract(stockOfCoins, amountInserted - p.price) in (
+				p.removeFromStock(1);
+		  		atomic (
+						stockOfCoins := MoneyUtils`removeAll(chg, stockOfCoins);
+						amountInserted := 0;
+						changeToPickup := chg; 
+						productToPickup := p;
+						status := <Delivering>
+				)
+	)
+	pre 	status = <EnteringCoins>  
+		 	and prodName in set dom products
+	    	and products(prodName).quantityInStock > 0
+			and amountInserted >= products(prodName).price
+	    	and MoneyUtils`canExtract(stockOfCoins, 
+						amountInserted - products(prodName).price);	
+
+	public pickChange: () ==> BagOfCoins 
+	pickChange() ==
+		let r = changeToPickup in (
+			atomic( 
+				changeToPickup := {|->};
+				status := if productToPickup = nil then <Idle> else <Delivering>
+			);
+			return r
+		)
+	pre changeToPickup <> {|->};
+	
+	public pickProduct: () ==> ProductName
+	pickProduct() == (
+		let r = productToPickup.name in (
+			atomic (
+				productToPickup := nil;
+				status := if changeToPickup = {|->} then <Idle> else <Delivering>
+			);
+			return r
+		)
+	)
+	pre productToPickup <> nil;
+				
+  public cancel: () ==> ()
+  cancel() ==
+		let chg = MoneyUtils`extract(stockOfCoins, amountInserted) in 
+			atomic (
+				stockOfCoins := MoneyUtils`removeAll(chg, stockOfCoins);
+				amountInserted := 0;
+				changeToPickup := chg;
+				status := <Delivering>
+			)
+	pre status = <EnteringCoins>;  
+
+end VendingMachine 

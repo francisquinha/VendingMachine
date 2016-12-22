@@ -1,0 +1,205 @@
+class TestVendingMachine is subclass of MyTestCase
+/*
+  Contains the test cases for the vending machine.
+  Illustrates a scenario-based testing approach.
+  The test cases cover all usage scenarios as well as all states and transitions.
+  Also illustrates the usage of assertions and '||'.
+  JPF, FEUP, MFES, 2014/15.
+*/
+
+operations
+	/***** USE CASE SCENARIOS ******/
+	
+	-- Normal scenario for configuring the vending machine in the factory,
+	-- as described in section 2.1 of the report, covering requirement R1.
+	-- 'prodsAtSale' is a map from names to prices.
+	public ConfigureScn: map Product`ProductName to Product`ProductPrice * VendingMachine`Password ==> VendingMachine
+	ConfigureScn(prodsAtSale, maintenanceCode) == (
+		dcl vm : VendingMachine := new VendingMachine();
+		|| ( vm.setProductsAtSale(prodsAtSale),
+	       vm.setMaintenanceCode(maintenanceCode));
+	  vm.setReady();
+	  return vm;	   
+	)
+	post {p.name |-> p.price | p in set rng RESULT.products} = prodsAtSale /*1*/
+		  	and RESULT.maintenanceCode = maintenanceCode /*2*/
+	     and RESULT.stockOfCoins = {|->} /*3*/
+	     and forall p in set rng RESULT.products & p.quantityInStock = 0 /*4*/
+			and RESULT.status = <Idle> /*5*/;
+	
+	-- Normal scenario for loading (adding) products and 
+	-- setting (adding/removing) the stock of coins in a vending machine,
+	-- as described in section 2.1 of the report, covering requirement R2.
+	public LoadStockScn: VendingMachine * VendingMachine`Password * 
+			map Product`ProductName to Product`ProductPrice * MoneyUtils`BagOfCoins ==> ()
+	LoadStockScn(vm, code, prods, coins) ==
+	(
+		-- manual old values
+		dcl oldQuantityInStock : map Product to nat := 
+                  {p |-> p.quantityInStock | p in set rng vm.products};
+
+		-- steps
+		vm.openDoor(code);
+		|| (vm.loadProducts(prods), vm.loadCoins(coins));		
+		vm.closeDoor();
+		
+		-- manual post-condition checking (not supported otherwise)
+		assertTrue(forall prodName in set dom prods & 
+						  let p = vm.products(prodName) in 
+    						 p.quantityInStock = oldQuantityInStock(p) + prods(prodName)) /*1*/
+  )
+  pre vm.status = <Idle> /*1*/
+  		 and code = vm.maintenanceCode /*2*/
+  		 and dom prods subset dom vm.products /*3*/
+  post vm.stockOfCoins = coins /*2*/
+  	    and vm.status = <Idle>; /*3*/
+  	      
+	-- Normal purchase scenario in a vending machine, 
+	-- as described in section 2.1 of the report, covering requirements R3 and R4.
+	public BuyProductScn: VendingMachine * Product`ProductName * MoneyUtils`BagOfCoins 
+					              ==> [Product`ProductName] * MoneyUtils`BagOfCoins
+	BuyProductScn(vm, prod, coins) == (
+		-- manual old values
+		dcl oldQuantityInStock : nat := vm.products(prod).quantityInStock; 
+		dcl oldStockOfCoins : MoneyUtils`BagOfCoins := vm.stockOfCoins; 
+		
+		-- steps
+		dcl inserted : nat := 0;
+		dcl deliveredProd : [seq of char] := nil;
+		dcl change : MoneyUtils`BagOfCoins := {|->};
+		dcl result : [Product`ProductName] * MoneyUtils`BagOfCoins;
+		for all c in set dom coins do
+			for all - in set {1 , ..., coins(c)} do (
+				vm.insertCoin(c);
+				inserted := inserted + c;
+				assertEqual(inserted, vm.amountInserted)
+      );      		
+    	vm.selectProduct(prod);    
+    	|| (deliveredProd := vm.pickProduct(), 
+    	if MoneyUtils`sum(coins) > vm.products(prod).price then 
+    	  	change := vm.pickChange());
+    	result := mk_(deliveredProd, change);
+    
+		-- manual post-condition checking (not supported otherwise)
+		assertTrue(vm.products(prod).quantityInStock = oldQuantityInStock - 1); /*3*/
+		assertTrue(MoneyUtils`addAll(vm.stockOfCoins, change) = 
+								MoneyUtils`addAll(oldStockOfCoins, coins)); /* 4*/ 
+								
+    return result;
+	)
+	pre vm.status = <Idle> /*1*/
+		 and (prod in set dom vm.products and vm.products(prod).quantityInStock > 0) /*2*/
+	    and MoneyUtils`sum(coins) >= vm.products(prod).price /*3*/ 
+	    and MoneyUtils`canExtract(MoneyUtils`addAll(vm.stockOfCoins, coins), 
+	                     MoneyUtils`sum(coins) - vm.products(prod).price) /*4*/	   
+	post let mk_(deliveredProd, change) = RESULT in (
+			  deliveredProd = prod /*1*/
+			  and MoneyUtils`sum(change)=MoneyUtils`sum(coins)-vm.products(prod).price/*2*/
+			  and vm.status = <Idle> /*5*/
+		);
+	
+	-- Exceptional buying scenario in which the user cancels the purchase.
+	-- as described in section 2.1 of the report, covering requirement R5.
+	public CancelScn: VendingMachine * MoneyUtils`BagOfCoins ==> MoneyUtils`BagOfCoins
+	CancelScn(vm, coins) == (
+	  -- 'manual' old value
+		dcl oldStockOfCoins : MoneyUtils`BagOfCoins := vm.stockOfCoins; 
+		
+		-- steps
+		dcl inserted : nat := 0;
+		dcl result : MoneyUtils`BagOfCoins;
+		for all c in set dom coins do
+			for all - in set {1 , ..., coins(c)} do (
+				vm.insertCoin(c);
+				inserted := inserted + c;
+				assertEqual(inserted, vm.amountInserted)
+     );      		
+		vm.cancel();    
+		result := vm.pickChange();
+    
+		-- 'manual' post-condition checking (not supported otherwise)
+		assertTrue(MoneyUtils`addAll(oldStockOfCoins, coins) =
+			         MoneyUtils`addAll(vm.stockOfCoins, result)); /*2*/
+			         
+		return result
+	)
+	pre  vm.status = <Idle> /*1*/
+	     and MoneyUtils`sum(coins) > 0 /*2*/ 
+	post MoneyUtils`sum(RESULT) = MoneyUtils`sum(coins) /*1*/
+			and vm.status = <Idle>; /*3*/
+
+	/***** TEST CASES WITH VALID INPUTS ******/
+	  	   
+	-- Test case in which we initialize a vending machine and
+	-- then buy two products, the first one with exact money and 
+	-- the second one with change.	   
+	public testLoadAndBuy: () ==> ()
+	testLoadAndBuy() == (
+		dcl vm: VendingMachine := ConfigureScn({"Bolicao" |-> 50, "Bongo" |-> 70}, "xa1!"); 
+  		LoadStockScn(vm, "xa1!", {"Bolicao" |-> 1, "Bongo" |-> 1}, { |-> });	
+  		let mk_(-, change) = BuyProductScn(vm, "Bolicao", {20 |-> 1, 10 |-> 3}) in
+  			assertEqual({ |-> }, change);    
+  		let mk_(-, change) = BuyProductScn(vm, "Bongo", {20 |-> 4}) in
+    		assertEqual({10 |-> 1}, change)
+	);
+
+	-- Test case in which we initialize a vending machine an then enter coins and cancel.
+	-- Also forces backtracking in the greedy algorithm for making change.	  
+	public testLoadAndCancel: () ==> ()
+	testLoadAndCancel() == (
+		let vm = ConfigureScn({"Bolicao" |-> 50}, "xa1!"),
+		    coins = {20 |-> 3}
+		in (
+		  LoadStockScn(vm, "xa1!", {"Bolicao" |-> 1}, { 50 |-> 1});  	
+		  assertEqual(coins,  CancelScn(vm, coins))
+		)
+	);
+    
+  -- Entry point that runs all tests with valid inputs
+  public testAll: () ==> ()
+  testAll() == (
+  		testLoadAndBuy();
+  		testLoadAndCancel();
+  );
+
+	/***** TEST CASES WITH INVALID INPUTS (EXECUTE ONE AT A TIME) ******/
+	public testCannotMakeChange: () ==> ()
+	testCannotMakeChange() == ( 	   
+  		let vm = ConfigureScn({"Bolicao" |-> 50}, "xa1!") in (
+  	  		LoadStockScn(vm, "xa1!", {"Bolicao" |-> 1}, { |-> });  	
+  	  		vm.insertCoin(100);
+			vm.selectProduct("Bolicao"); -- breaks pre-condition
+		)
+	);
+  
+	public testProductOutOfStock: () ==> ()
+	testProductOutOfStock() == ( 	   
+  		let vm = ConfigureScn({"Bolicao" |-> 50}, "xa1!") in (
+			vm.insertCoin(50);
+			vm.selectProduct("Bolicao"); -- breaks pre-condition
+		)
+  );
+   
+	public testForgotToPickProduct: () ==> ()
+	testForgotToPickProduct() == ( 	   
+  	let vm = ConfigureScn({"Bolicao" |-> 50}, "xa1!") in (
+  	  LoadStockScn(vm, "xa1!", {"Bolicao" |-> 1}, { |-> });  	
+  	  		vm.insertCoin(50);
+  	  		vm.selectProduct("Bolicao"); 
+  	  		-- forgot: vm.pickProduct();
+  	  		vm.insertCoin(50); -- breaks pre-condition
+		)
+	);    
+
+	public testForgotToPickChange: () ==> ()
+	testForgotToPickChange() == ( 	   
+ 		let vm = ConfigureScn({"Bolicao" |-> 50}, "xa1!") in (
+  	  		LoadStockScn(vm, "xa1!", {"Bolicao" |-> 1}, { |-> });  	
+  	  		vm.insertCoin(50);
+  	  		vm.cancel(); 
+			-- forgot: vm.pickChange();
+  	  		vm.insertCoin(50); -- breaks pre-condition
+		)
+	);    
+  
+end TestVendingMachine 
